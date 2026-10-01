@@ -680,7 +680,7 @@
     return bombs.some(b=>b.c===c&&b.r===r&&!b.passable);
   }
   function canMove(x,y){
-    const pad=9;
+    const pad=10;
     const pts=[[x+pad,y+pad],[x+TILE-pad,y+pad],[x+pad,y+TILE-pad],[x+TILE-pad,y+TILE-pad]];
     // A bomb blocks movement, except while Dili is still overlapping the bomb
     // he just placed. This lets the player escape without being trapped by its hitbox.
@@ -714,56 +714,71 @@
     const here=tileAt(player.x,player.y);
     const poisoned=poisonTiles.some(p=>p.c===here.c&&p.r===here.r);
     const mushroomed=mushroomTiles.some(p=>p.c===here.c&&p.r===here.r);
-    const step=player.speed*(player.stunTimer>0?0:(poisoned||mushroomed?0.48:1))*dt;
+    const speedMul=player.stunTimer>0?0:(poisoned||mushroomed?0.48:1);
+    let totalX=dx*player.speed*speedMul*dt;
+    let totalY=dy*player.speed*speedMul*dt;
+    if(!totalX && !totalY) return;
 
-    // Smooth wall sliding for diagonal movement.
-    // When a diagonal vector hits a wall/corner, do not stop completely:
-    // first try the horizontal component, then the vertical component.
-    // This makes ↗/↘/↙/↖ movement naturally slide along the wall.
-    const startX=player.x, startY=player.y;
-    const nx=startX+dx*step, ny=startY+dy*step;
-    let movedX=false, movedY=false;
+    // Collision-safe movement: break the frame into small pieces. This prevents
+    // a fast frame, a corner, or a thin wall edge from leaving Dili in a
+    // position where the next frame cannot find a valid escape direction.
+    const maxStep=1.25;
+    const pieces=Math.max(1,Math.ceil(Math.max(Math.abs(totalX),Math.abs(totalY))/maxStep));
+    const sx=totalX/pieces, sy=totalY/pieces;
+    let movedAny=false;
 
-    // 1) Try the complete movement first.
-    if((dx===0 || canMove(nx,startY)) && (dy===0 || canMove(nx,ny))){
-      if(dx){ player.x=nx; movedX=true; }
-      if(dy){ player.y=ny; movedY=true; }
-    } else {
-      // 2) Diagonal is blocked. Slide instead of freezing.
-      // Horizontal is preferred so a diagonal aimed into a top/bottom wall
-      // continues sideways in the same diagonal direction.
-      if(dx && canMove(nx,startY)){
-        player.x=nx;
-        movedX=true;
-      }
-      if(dy && canMove(player.x,ny)){
-        player.y=ny;
-        movedY=true;
-      }
+    for(let i=0;i<pieces;i++){
+      const x0=player.x, y0=player.y;
+      let moved=false;
 
-      // 3) If horizontal movement was blocked by a side wall, try vertical.
-      // The same logic also handles narrow corners and map edges smoothly.
-      if(dx && dy && !movedX && !movedY){
-        if(canMove(startX,ny)){
-          player.y=ny;
-          movedY=true;
-        } else if(canMove(nx,startY)){
-          player.x=nx;
-          movedX=true;
+      // First take the requested diagonal step. If one component is blocked,
+      // immediately keep the free component so Dili slides along the block.
+      if(canMove(x0+sx,y0+sy)){
+        player.x=x0+sx;
+        player.y=y0+sy;
+        moved=true;
+      } else {
+        const canX=canMove(x0+sx,y0);
+        const canY=canMove(x0,y0+sy);
+
+        if(canX && canY){
+          // At a tight corner, keep the component with the larger joystick
+          // intent. This avoids tiny alternating X/Y corrections that feel stuck.
+          if(Math.abs(dx)>=Math.abs(dy)) player.x=x0+sx;
+          else player.y=y0+sy;
+          moved=true;
+        } else if(canX){
+          player.x=x0+sx;
+          moved=true;
+        } else if(canY){
+          player.y=y0+sy;
+          moved=true;
+        } else {
+          // If the player is touching a corner, make a tiny escape probe along
+          // each axis. This is deliberately small so it cannot jump through a wall.
+          const nudge=0.8;
+          const probes=[];
+          if(Math.abs(dx)>=Math.abs(dy)){
+            if(sx && canMove(x0+Math.sign(sx)*nudge,y0)) probes.push(['x',Math.sign(sx)*nudge]);
+            if(sy && canMove(x0,y0+Math.sign(sy)*nudge)) probes.push(['y',Math.sign(sy)*nudge]);
+          }else{
+            if(sy && canMove(x0,y0+Math.sign(sy)*nudge)) probes.push(['y',Math.sign(sy)*nudge]);
+            if(sx && canMove(x0+Math.sign(sx)*nudge,y0)) probes.push(['x',Math.sign(sx)*nudge]);
+          }
+          if(probes.length){
+            const [axis,v]=probes[0];
+            if(axis==='x') player.x=x0+v; else player.y=y0+v;
+            moved=true;
+          }
         }
       }
+      movedAny ||= moved;
     }
 
-    // Tiny grid correction only when genuinely blocked, preventing the player
-    // from visually snagging on a wall while still allowing smooth sliding.
-    if(dx && !movedX && Math.abs(player.y-Math.round(player.y/TILE)*TILE)<5){
-      player.y=Math.round(player.y/TILE)*TILE;
-    }
-    if(dy && !movedY && Math.abs(player.x-Math.round(player.x/TILE)*TILE)<5){
-      player.x=Math.round(player.x/TILE)*TILE;
-    }
+    // No hard grid snap here. Continuous movement is intentional; the old
+    // snap-to-grid correction could pull Dili back into a corner after a slide.
 
-    if(movedX || movedY){
+    if(movedAny){
       if(Math.abs(dx)>Math.abs(dy)) player.facing=dx<0?'left':'right';
       else if(Math.abs(dy)>Math.abs(dx)) player.facing=dy<0?'up':'down';
       else player.facing=dy<0?'up':'down';
